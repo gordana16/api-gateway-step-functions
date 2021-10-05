@@ -1,0 +1,132 @@
+service: api-gateway-step-functions
+
+# You can pin your service to only deploy with a specific Serverless version
+# Check out our docs for more details
+frameworkVersion: '2'
+useDotenv: true
+
+plugins:
+  - serverless-step-functions
+  - serverless-dotenv-plugin
+
+custom:
+  stage: ${opt:stage, self:provider.stage}
+  tableName: ${self:service}-accountTable-${self:custom.stage}
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+  stage: dev
+  lambdaHashingVersion: 20201221
+
+functions:
+  validateAccount:
+    handler: handler.validate
+
+stepFunctions:
+  stateMachines:
+    validatingAccountWorkflow:
+      events:
+        - http:
+            path: account/add
+            method: post
+            request:
+              template: lambda_proxy
+              parameters:
+                querystrings:
+                  name: true
+                  email: false
+                  work: false
+                StateMachineArn: !GetAtt myStateMachineFromAPIGateway.Arn
+      name: myStateMachineFromAPIGateway
+      definition:
+        Comment: This is state machine triggered by API Gateway
+        StartAt: Input Manipulator
+        States:
+          Input Manipulator:
+            Type: Pass
+            Next: Validate account data
+            InputPath: $.queryStringParameters
+          Validate account data:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              Payload.$: $
+              FunctionName: !GetAtt validateAccount.Arn
+            ResultSelector:
+              validated.$: $.Payload.validated
+            ResultPath: $.Payload
+            Next: Is this account valid?
+          Is this account valid?:
+            Type: Choice
+            Choices:
+              - Variable: $.Payload.validated
+                BooleanEquals: true
+                Next: Store account info
+            Default: Send failed email
+          Store account info:
+            Type: Task
+            Resource: arn:aws:states:::dynamodb:putItem
+            Parameters:
+              TableName: ${self:custom.tableName}
+              Item:
+                name:
+                  S.$: $.name
+                email:
+                  S.$: $.email
+                work:
+                  S.$: $.work
+            Next: Send successful email
+            ResultPath: $.myDynamoPutResult
+          Send successful email:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              Message:
+                name.$: $.name
+                accountCreation: 'true'
+              TopicArn: !Ref AccountSNSTopic
+            End: true
+          Send failed email:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: !Ref AccountSNSTopic
+              Message:
+                name.$: $.name
+                accountCreation: 'false'
+            Next: Fail
+          Fail:
+            Type: Fail
+            Error: AccountValidationFailed
+            Cause: An error while validating account
+
+# you can add CloudFormation resource templates here
+resources:
+  Resources:
+    accountTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        AttributeDefinitions:
+          - AttributeName: name
+            AttributeType: S
+        KeySchema:
+          - AttributeName: name
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+
+    AccountSNSTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: Account Topic
+        TopicName: ${self:service}-account-topic-${self:provider.stage}
+
+    SNSSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Endpoint: ${env:ADMIN_EMAIL_ADDR}
+        Protocol: email
+        TopicArn: !Ref AccountSNSTopic
