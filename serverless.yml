@@ -37,7 +37,13 @@ stepFunctions:
                   name: true
                   email: false
                   work: false
-                StateMachineArn: !GetAtt myStateMachineFromAPIGateway.Arn
+            iam:
+              role:
+                statements:
+                  - Effect: 'Allow'
+                    Action:
+                      - 'states:StartExecution'
+                    Resource: !Ref MyStateMachineFromAPIGateway
       name: myStateMachineFromAPIGateway
       definition:
         Comment: This is state machine triggered by API Gateway
